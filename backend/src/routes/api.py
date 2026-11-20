@@ -2,14 +2,16 @@ import os,json
 import redis
 from fastapi import APIRouter,Depends,HTTPException,Response
 from src.config.database import db
-from src.models.entities import User,Settlement,Pivot,Review,Audit
-from src.schemas.business import Login,SettlementInput,PivotInput,ReviewInput,ReviewEdit
+from src.models.entities import User,Settlement,Pivot,Review,Audit,ShowSession,SalesReport,WarningBatch
+from src.schemas.business import Login,SettlementInput,PivotInput,ReviewInput,ReviewEdit,SessionInput,ReportInput,BatchInput
 from src.middlewares.auth import current,editor,admin
 from src.utils.security import verify,token
 from src.services.business import audit,dump
 from src.services.settlements import save
 from src.services.analysis import key
 from src.controllers.business import ensure_pivot,ensure_review,cell
+from src.controllers.sales import ensure_batch
+from src.services.sales import save_session,save_report,create_batch,rerun_batch,compute
 router=APIRouter()
 @router.post('/auth/login')
 def login(data:Login,s=Depends(db)):
@@ -45,7 +47,7 @@ def drill(i:int,row_key:str,col_key:str,u=Depends(current),s=Depends(db)):
 def export(i:int,u=Depends(current),s=Depends(db)):
  r=ensure_pivot(s,i)
  if r.state!='done':raise HTTPException(409,'仅成功透视可以导出')
- return Response(json.dumps(dump(r),ensure_ascii=False,indent=2),media_type='application/json',headers={'Content-Disposition':f'attachment; filename="stage-pivot-{i}.json"'})
+ return Response(json.dumps(dump(r),ensure_ascii=False,indent=2,default=str),media_type='application/json',headers={'Content-Disposition':f'attachment; filename="stage-pivot-{i}.json"'})
 @router.get('/reviews')
 def reviews(u=Depends(current),s=Depends(db)):return [dump(r) for r in s.query(Review).order_by(Review.id.desc()).all()]
 @router.post('/reviews')
@@ -64,3 +66,29 @@ def approve(i:int,u=Depends(admin),s=Depends(db)):
  r.status='approved';s.commit();audit(s,u,'签核差异复核 '+str(i));return dump(r)
 @router.get('/audits')
 def audits(u=Depends(admin),s=Depends(db)):return [dump(r) for r in s.query(Audit).order_by(Audit.id.desc()).limit(100)]
+# 临演售票预警
+@router.get('/sessions')
+def sessions(u=Depends(current),s=Depends(db)):return [dump(r) for r in s.query(ShowSession).order_by(ShowSession.show_day,ShowSession.id).all()]
+@router.post('/sessions')
+def create_session(data:SessionInput,u=Depends(editor),s=Depends(db)):
+ r=save_session(s,data);audit(s,u,'建档演出场次 '+r['code']);return r
+@router.get('/reports')
+def reports(u=Depends(current),s=Depends(db)):return [dump(r) for r in s.query(SalesReport).order_by(SalesReport.id).all()]
+@router.post('/reports')
+def create_report(data:ReportInput,u=Depends(editor),s=Depends(db)):
+ r=save_report(s,data);audit(s,u,'补报售票数据 '+data.code+' '+data.report_day.isoformat());return r
+@router.get('/warnings')
+def warnings(u=Depends(current),s=Depends(db)):return [dump(r) for r in s.query(WarningBatch).order_by(WarningBatch.id.desc()).all()]
+@router.post('/warnings')
+def create_warning(data:BatchInput,u=Depends(editor),s=Depends(db)):
+ r=create_batch(s,data);cutoff=r['cutoff_at'];audit(s,u,'提交预警版本 '+str(r['id'])+' 截止 '+(cutoff.isoformat() if hasattr(cutoff,'isoformat') else str(cutoff)));return r
+@router.get('/warnings/{i}')
+def warning_detail(i:int,u=Depends(current),s=Depends(db)):return dump(ensure_batch(s,i))
+@router.post('/warnings/{i}/rerun')
+def warning_rerun(i:int,u=Depends(editor),s=Depends(db)):
+ b=ensure_batch(s,i);r=rerun_batch(s,b);audit(s,u,'按原截止点补跑预警版本 '+str(i));return r
+@router.get('/warnings/{i}/export')
+def warning_export(i:int,u=Depends(current),s=Depends(db)):
+ r=ensure_batch(s,i)
+ if r.state!='done':raise HTTPException(409,'仅已发布版本可以导出')
+ return Response(json.dumps(dump(r),ensure_ascii=False,indent=2,default=str),media_type='application/json',headers={'Content-Disposition':f'attachment; filename="sales-warning-{i}.json"'})

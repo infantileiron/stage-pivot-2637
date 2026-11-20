@@ -6,7 +6,7 @@
 
 云幕剧院有云幕大剧场、河畔小剧场和星光排练厅。财务组当前把 `云幕_场次结算_20261115.xlsx` 中多张表复制到工作簿，再按场馆和渠道求和，最后在邮件里解释回单差异。痛点是座位百分比被简单平均、分币四舍五入不守恒、原始明细改动后难以重现旧结论。上游是独立场次票款及核验记录；本项目替代布局、计算、追溯及复核；下游是财务负责人核对渠道回单，不触发付款。
 
-四页：结算明细（录入/修订）、透视布局（白名单行列方案）、结算透视（守恒总计/冻结下钻/导出）、差异复核（回单预期/原因/签核）。三核心实体 Settlement、Pivot、Review，另有User/Audit。每条记录为独立场次，渠道是主售票渠道；当前不拆分同一场次的多个售票渠道座位。
+四页：结算明细（录入/修订）、透视布局（白名单行列方案）、结算透视（守恒总计/冻结下钻/导出）、差异复核（回单预期/原因/签核），另设第五页售票预警（每日补报/截止版本/名单样本/排除原因）。三核心实体 Settlement、Pivot、Review，预警域实体 ShowSession、SalesReport、WarningBatch，另有User/Audit。每条结算为独立场次，渠道是主售票渠道；当前不拆分同一场次的多个售票渠道座位。
 
 |角色|权限|动作|
 |---|---|---|
@@ -23,7 +23,7 @@ docker compose up -d --build
 docker compose exec -T backend python -m scripts.seed_demo
 ```
 
-前端 [localhost:18211](http://localhost:18211)，后端 [localhost:19211/docs](http://localhost:19211/docs)，MySQL宿主17711。账号 `admin@demo.local`、`analyst@demo.local`、`viewer@demo.local`，密码均 `Demo123!`。`SEED_DEMO=true`启动自动种子；再次执行不新增同编号、不覆盖人工修订。种子包含180独立场次、3场馆、3渠道、4演出、9–10月日期。
+前端 [localhost:18211](http://localhost:18211)，后端 [localhost:19211/docs](http://localhost:19211/docs)，MySQL宿主17711。账号 `admin@demo.local`、`analyst@demo.local`、`viewer@demo.local`，密码均 `Demo123!`。`SEED_DEMO=true`启动自动种子；再次执行不新增同编号、不覆盖人工修订。种子包含180独立结算场次、3场馆、3渠道、4演出、9–10月日期；预警域含72个演出场次（60已演+12未演）与每日售票上报，内置漏报、售罄、迟到上报三类场景。
 
 ## 一天的剧本
 
@@ -35,6 +35,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 6. 10:00 点击单元格下钻，查看原始场次与分项金额，选“为该单元起草差异复核”。
 7. 10:10 回单预期比账面多1234分，写明“回单晚入账12.34元，已核对凭据”，保存草案。
 8. 10:20 admin签核，viewer下载 `stage-pivot-<id>.json`，包含冻结明细与所有边际总计。
+9. 14:00 临演发现票卖慢：在售票预警页为未演场次补报当日累计售票与可售座位（漏报留空），指定截止时间发布版本；worker完成后查看低于同演出同场馆历史中位数的预警名单、对齐样本与排除原因，导出`sales-warning-<id>.json`。迟到补报只进下一版，已发布版本不被改写。
 
 ## 口径和算法
 
@@ -43,6 +44,14 @@ docker compose exec -T backend python -m scripts.seed_demo
 上座率=总核验/总座位，不能平均各场百分比。零座位为null/未定义，不能伪装0%。已知样例：100座100核验和300座150核验，上座率250/400=.625，简单平均.75是错误口径。金额分币保持整数，持久化采用BIGINT，显示时除100。
 
 提交时冻结输入快照，worker保留checksum。下钻只读该快照，原始明细修订不会改变历史结果。差异=回单预期净额−冻结账面净额，可正可负。签核只确认复核理由，不改账、不付款。已签核Review不可更新，需新增复核；Pivot为不可覆盖版本，重新计算需新建。空数据、重复场次或非法维度失败可恢复，补录/调整后新建任务。单worker启动恢复queued/running任务。
+
+## 临演售票预警口径
+
+临演才发现票卖慢时，按场次收集每日**累计售票数**与**可售座位**，每条上报记录到达时间；某日漏报即留空，不补零、不参与该日比较。预警以“版本（WarningBatch）”发布：分析员指定截止时间，系统在入队瞬间冻结该时点前**已到达**的上报快照，仅对截止日当天仍未开演的场次出预警。
+
+售票率=累计售票数/(累计售票数+可售座位)。对每个未演目标场次，取**同演出、同场馆的已演场次**，对齐“距开演同样天数”那一天的售票率形成历史样本，取中位数；目标当前售票率**严格低于**中位数才进预警名单，每条预警随附全部历史样本。目标当天漏报（`target_missing`）、可售座位为0即售罄（`target_soldout`）不参与；历史样本中缺数或售罄的记录同样剔除，有效样本不足2条则不出预警（`insufficient_history`）；不低于中位数记为`above_median`，已开演记为`already_performed`。每个未入名单场次都在版本结果里给出排除原因。
+
+回看只用截止前已到的数据：迟到上报、对历史上报的更正只影响之后新建的版本，已发布版本的冻结快照与名单永不变。worker中断后重启，把queued/running版本按原截止点重新入队、沿用原快照恢复；已done版本拒绝重跑（接口409），失败版本可在预警页“按原截止点补跑”，重跑不向同一版追加新预警。计算期间可继续并发补报。预警页支持场次建档、每日补报/更正、发布版本，并可逐版查看名单、样本、排除原因与导出`sales-warning-<id>.json`。时间统一按UTC比较。
 
 ## 技术和目录
 
@@ -53,7 +62,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 |持久化|MySQL8 + Redis7 + 共享结果卷|
 |网关|Nginx1.27，同源`/api/`剥离前缀转到后端根路由|
 
-`backend/src`分routes/controllers/services/models/schemas/config/middlewares/utils/constants；`frontend/src`分api/stores/pages/components/hooks/utils/constants/types/router。Settlement、Pivot、Review贯穿数据库/API/页面。请求ID、安全响应头两中间件；写操作审计、全局错误响应。角色ROLES、状态STATES、维度DIMENSIONS、场馆VENUES、渠道CHANNELS：后端`src/constants/enums.py`与`schemas/business.py`，前端`src/constants/enums.js`；算法维度白名单另见后端`services/analysis.py`；持久化列见models/entities.py。
+`backend/src`分routes/controllers/services/models/schemas/config/middlewares/utils/constants；`frontend/src`分api/stores/pages/components/hooks/utils/constants/types/router。Settlement、Pivot、Review贯穿数据库/API/页面，售票预警由ShowSession、SalesReport、WarningBatch与`services/warnings.py`（纯函数口径）、`services/sales.py`（快照与入队）支撑，worker同时消费`stage:pivots`与`stage:warnings`两条队列。请求ID、安全响应头两中间件；写操作审计、全局错误响应。角色ROLES、状态STATES、维度DIMENSIONS、场馆VENUES、渠道CHANNELS：后端`src/constants/enums.py`与`schemas/business.py`，前端`src/constants/enums.js`；算法维度白名单另见后端`services/analysis.py`；持久化列见models/entities.py。
 
 5服务frontend/backend/worker/db/redis均有healthcheck。backend等db/redis，worker额外等backend，frontend等backend。MySQL/Redis/结果使用命名卷，worker `/tmp/heartbeat`验证活性，结果落共享 `/artifacts`。`NETWORK_SUBNET=10.253.112.0/24`规避本机默认地址池耗尽，可移机修改；其他环境变量COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO见.env.example。演示密码与JWT密钥部署时替换。
 

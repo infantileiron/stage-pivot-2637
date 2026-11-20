@@ -1,6 +1,6 @@
 from pydantic import BaseModel,Field,model_validator
-from typing import Literal
-from datetime import date
+from typing import Literal,Optional
+from datetime import date,datetime
 Dimension=Literal['venue','play','channel','month']
 class Login(BaseModel):email:str;password:str
 class SettlementInput(BaseModel):
@@ -36,3 +36,18 @@ class ReviewInput(BaseModel):
 class ReviewEdit(BaseModel):
  expected_cents:int=Field(ge=0,le=1000000000000)
  note:str=Field(min_length=8,max_length=2000)
+class SessionInput(BaseModel):
+ code:str=Field(min_length=1,max_length=60)
+ play:str=Field(min_length=1,max_length=60)
+ venue:Literal['云幕大剧场','河畔小剧场','星光排练厅']
+ show_day:date
+ capacity:int=Field(ge=1,le=100000)
+class ReportInput(BaseModel):
+ code:str=Field(min_length=1,max_length=60)
+ report_day:date
+ sold_total:int=Field(ge=0,le=100000)
+ available_seats:int=Field(ge=0,le=100000)
+ received_at:Optional[datetime]=None
+class BatchInput(BaseModel):
+ name:str=Field(min_length=2,max_length=100)
+ cutoff_at:datetime
